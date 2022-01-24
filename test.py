@@ -6,3 +6,5 @@ def sub(a,b):
     return a-b
 def div(a,b):
     return a/b
+def mov(a,b):
+    return a%b
