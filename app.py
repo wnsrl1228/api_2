@@ -1,84 +1,120 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, current_app
 from flask.json import JSONEncoder
+from sqlalchemy import create_engine, text
 
 class CustomJSONEncoder(JSONEncoder):
     def default(self,obj):
         if isinstance(obj, set):
             return list(obj)
         return JSONEncoder.default(self,obj)
-app = Flask(__name__)
-app.users = {}
-app.id_count = 1
+def create_app(test_config = None):
+    app = Flask(__name__)
 
-app.tweets = []
+    app.json_encoder = CustomJSONEncoder
 
-app.json_encoder = CustomJSONEncoder
-@app.route("/sign-up",methods=['POST'])
-def sign_up():
-    new_user = request.json
-    new_user["id"] = app.id_count
-    app.users[app.id_count] = new_user
-    app.id_count += 1
+    if test_config is None:
+        app.config.from_pyfile("config.py")
+    else:
+        app.config.update(test_config)
 
-    return jsonify(new_user)
-@app.route("/tweet",methods=['POST'])
-def tweet():
-    payload = request.json
-    user_id = int(payload["id"])
-    tweet = payload["tweet"]
-
-    if user_id not in app.users:
-        return "NO ID"
-
-    if len(tweet) > 300:
-        return "300 over"
-
-    user_id = int(payload['id'])
+    database = create_engine(app.config['DB_URL'] , encoding = 'utf-8',max_overflow=0)
+    app.database = database
     
-    app.tweets.append({
-        'user_id' : user_id,
-        'tweet' : tweet
-        })
-    return '',200
 
-@app.route("/follow",methods=['POST'])
-def follow():
-    payload = request.json
-    user_id = int(payload['id'])
-    follow_id = int(payload['follow'])
+    @app.route("/sign-up",methods=['POST'])
+    def sign_up():
+        new_user = request.json
+        new_user_id = app.database.execute(text("""
+            INSERT INTO users (
+                name,
+                email,
+                profile,
+                hashed_password
+            ) VALUES (
+                :name,
+                :email,
+                :profile,
+                :password
+            )
+            """),new_user).lastrowid
+        row = current_app.database.execute(text("""
+            SELECT
+                id,
+                name,
+                email,
+                profile
+            FROM users
+            WHERE id = :user_id
+            """),{'user_id' : new_user_id}).fetchone()
+        create_user = {
+            'id' : row['id'],
+            'name' : row['name'],
+            'email' : row['email'],
+            'profile' : row['profile']
+            } if row else None
+        return jsonify(create_user)
 
-    if user_id not in app.users or follow_id not in app.users:
-        return "Can't find id or follow_id"
+    @app.route("/tweet",methods=['POST'])
+    def tweet():
+        user_tweet = request.json
+        tweet = user_tweet['tweet']
+        
+        if len(tweet) > 300:
+            return '300 over',400
+        app.database.execute(text("""
+            INSERT INTO tweets(
+                user_id,
+                tweet
+                )VALUES(
+                :id,
+                :tweet
+                )
+            """),user_tweet)
+        return '',200
+    @app.route("/follow",methods=['POST'])
+    def follow():
+        payload = request.json
 
-    user = app.users[user_id]
-    user.setdefault('follow',set()).add(follow_id)
+        app.database.execute(text("""
+            INSERT INTO users_follow_list (
+                user_id,
+                follow_user_id
+                )VALUES(
+                :id,
+                :follow
+            )"""),payload).rowcount
+        return '',200
+    @app.route("/unfollow",methods=['POST'])
+    def unfollow():
+        payload = request.json
+        app.database.execute(text("""
+            DELETE FROM users_follow_list
+            WHERE user_id = :id
+            AND follow_user_id = :unfollow
+            """),payload).rowcount
+        return '',200
+    @app.route("/timeline/<int:user_id>",methods=['GET'])
+    def timeline(user_id):
+        rows = app.database.execute(text("""
+            SELECT 
+                t.user_id,
+                t.tweet
+            FROM tweets t
+            LEFT JOIN users_follow_list ufl ON ufl.user_id = :user_id
+            WHERE t.user_id = :user_id
+            OR t.user_id = ufl.follow_user_id
+            """),{'user_id' : user_id}).fetchall()
 
-    return jsonify(user)
-@app.route("/unfollow",methods=['POST'])
-def unfollow():
-    payload = request.json
-    user_id = int(payload['id'])
-    unfollow_id = int(payload['unfollow'])
+        timeline = [{
+            'user_id' : row['user_id'],
+            'tweet' : row['tweet']
+            } for row in rows]
+        return jsonify({
+            'user_id' : user_id,
+            'timeline' : timeline
+            })
+    @app.route("/ping", methods=['GET'])
+    def ping():
+        return "pong"
 
-    if user_id not in app.users or unfollow_id not in app.users:
-        return "Can't find id or unfollow_id"
-    user = app.users[user_id]
-    user.setdefault('follow',set()).discard(unfollow_id)
-
-    return jsonify(user)
-@app.route("/timeline/<int:user_id>",methods=['GET'])
-def timeline(user_id):
-    if user_id not in app.users:
-        return "Can't find id"
-    follow_list = app.users[user_id].get('follow',set())
-    follow_list.add(user_id)
-    timeline = [tweet for tweet in app.tweets if tweet['user_id'] in follow_list]
-
-    return jsonify({
-        'user_id' : user_id,
-        'timeline' : timeline
-        })
-
-@app.route("/ping", methods=['GET'])
-def ping():
-    return "pong"
+    return app
