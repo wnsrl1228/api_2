@@ -187,6 +187,7 @@ def create_app(test_config = None):
     @login_required
     def follow():
         payload = request.json
+        payload['id'] = g.user_id
         insert_follow(payload) 
 
         return '', 200
@@ -195,6 +196,7 @@ def create_app(test_config = None):
     @login_required
     def unfollow():
         payload = request.json
+        payload['id'] = g.user_id
         insert_unfollow(payload)
 
         return '', 200
